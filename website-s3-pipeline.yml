@@ -1,0 +1,306 @@
+Description:
+  resources & pipeline for a static website on s3
+Metadata:
+  Role: website
+
+Resources:
+Mappings:
+  RegionMap:
+    us-east-1:
+      S3HostedZoneId: Z3AQBSTGFYJSTF
+      S3Endpoint: s3-website-us-east-1.amazonaws.com
+  
+Parameters:
+  ApexDomainName:
+    Description: Domain name for your site (example.com)
+    Type: String
+  AppName:
+    Description: App name for your website (example)
+    Type: String
+
+Resources:
+  ### Bucket Definitions ###
+  RootBucket:
+    Type: "AWS::S3::Bucket"
+    DeletionPolicy: Delete
+    Properties:
+      BucketName: !Ref ApexDomainName
+      AccessControl: PublicRead
+      WebsiteConfiguration:
+        IndexDocument: index.html
+        ErrorDocument: 404.html
+  
+  WWWBucket:
+    Type: "AWS::S3::Bucket"
+    DeletionPolicy: Delete
+    Properties:
+      BucketName: !Join
+        - ''
+        - - www.
+          - !Ref ApexDomainName
+      AccessControl: BucketOwnerFullControl
+      WebsiteConfiguration:
+        RedirectAllRequestsTo:
+          HostName: !Ref RootBucket
+  
+  DevBucket:
+    Type: "AWS::S3::Bucket"
+    DeletionPolicy: Delete
+    Properties:
+      BucketName: !Join
+        - ''
+        - - dev.
+          - !Ref ApexDomainName
+      AccessControl: PublicRead
+      WebsiteConfiguration:
+        IndexDocument: index.html
+        ErrorDocument: 404.html
+  
+  ArtifactBucket:
+    Type: "AWS::S3::Bucket"
+    DeletionPolicy: Delete
+    Properties:
+      BucketName: website-artifacts
+      AccessControl: Private
+
+  ### GIT Repo Definition ###
+  GIT:
+    Type: "AWS::CodeCommit::Repository"
+    Properties:
+      RepositoryDescription: !Join
+        - ''
+        - - !Ref ApexDomainName
+          - Code Repository
+      RepositoryName: !Ref ApexDomainName
+
+  ### CodeBuild Definition ###
+  CodeBuildRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          -
+            Effect: Allow
+            Principal:
+              Service:
+                - codebuild.amazonaws.com
+            Action: 'sts:AssumeRole'
+      Path: /
+  CodeBuildRolePolicy:
+    Type: "AWS::IAM::Policy"
+    Properties:
+      PolicyName: CodeBuildRolePolicy
+      PolicyDocument:
+        Statement:
+          -
+            Effect: Allow
+            Resource:
+              - !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/*
+            Action:
+              - 'logs:CreateLogGroup'
+              - 'logs:CreateLogStream'
+              - 'logs:PutLogEvents'
+          -
+            Effect: Allow
+            Resource:
+              - !Sub 'arn:aws:s3:::${ArtifactBucket}'
+              - !Sub 'arn:aws:s3:::${ArtifactBucket}/*'
+              - !Sub 'arn:aws:s3:::${RootBucket}'
+              - !Sub 'arn:aws:s3:::${RootBucket}/*'
+              - !Sub 'arn:aws:s3:::${DevBucket}'
+              - !Sub 'arn:aws:s3:::${DevBucket}/*'
+            Action:
+              - 's3:*'
+      Roles:
+        - !Ref CodeBuildRole
+  CodeBuildRoot:
+    Type: "AWS::CodeBuild::Project"
+    Properties:
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: 'aws/codebuild/ubuntu-base:14.04'
+        Type: LINUX_CONTAINER
+        EnvironmentVariables:
+          - Name: BUCKET_NAME
+            Value: !Ref RootBucket
+      Name: !Join
+        - _
+        - - !Ref AppName
+          - Root_Build
+      ServiceRole: !Ref CodeBuildRole
+      Source:
+        Type: CODEPIPELINE
+      TimeoutInMinutes: 10
+
+  CodeBuildDev:
+    Type: "AWS::CodeBuild::Project"
+    Properties:
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: 'aws/codebuild/ubuntu-base:14.04'
+        Type: LINUX_CONTAINER
+        EnvironmentVariables:
+          - Name: BUCKET_NAME
+            Value: !Ref DevBucket
+      Name: !Join 
+        - _
+        - - !Ref AppName
+          - Dev_Build
+      ServiceRole: !Ref CodeBuildRole
+      Source:
+        Type: CODEPIPELINE
+      TimeoutInMinutes: 10
+
+  CodePipelineRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - 
+            Effect: Allow
+            Principal:
+              Service:
+                - codepipeline.amazonaws.com
+            Action: 'sts:AssumeRole'
+      Path: /
+  CodePipelineRolePolicy:
+    Type: 'AWS::IAM::Policy'
+    Properties:
+      PolicyName: CodePipelineRolePolicy
+      PolicyDocument:
+        Statement:
+          - Action:
+              - 's3:GetObject'
+              - 's3:GetObjectVersion'
+              - 's3:GetBucketVersioning'
+            Resource: '*'
+            Effect: Allow
+          - Action:
+              - 's3:PutObject'
+            Resource:
+              - !Sub 'arn:aws:s3:::${ArtifactBucket}'
+              - !Sub 'arn:aws:s3:::${ArtifactBucket}/*'
+            Effect: Allow
+          - Action:
+              - 'codebuild:BatchGetBuilds'
+              - 'codebuild:StartBuild'
+            Resource: '*'
+            Effect: Allow
+          - Action:
+              - 'codecommit:GetBranch'
+              - 'codecommit:GetCommit'
+              - 'codecommit:UploadArchive'
+              - 'codecommit:GetUploadArchiveStatus'
+              - 'codecommit:CancelUploadArchive'
+            Resource: '*'
+            Effect: Allow
+      Roles:
+        - !Ref CodePipelineRole
+
+  CodePipelineRoot:
+    Type: 'AWS::CodePipeline::Pipeline'
+    Properties:
+      RoleArn: !GetAtt 
+        - CodePipelineRole
+        - Arn
+      Stages:
+        - Name: Source
+          Actions:
+            - Name: SourceAction
+              ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Version: '1'
+                Provider: CodeCommit
+              OutputArtifacts:
+                - Name: StaticSiteSource
+              Configuration:
+                BranchName: master
+                RepositoryName: !GetAtt 
+                  - GIT
+                  - Name
+              RunOrder: 1
+        - Name: Build
+          Actions:
+            - Name: BuildRoot
+              InputArtifacts:
+                - Name: StaticSiteSource
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Version: '1'
+                Provider: CodeBuild
+              Configuration:
+                ProjectName: !Ref CodeBuildRoot
+              RunOrder: 1
+      ArtifactStore:
+        Type: S3
+        Location: !Ref ArtifactBucket
+        
+  CodePipelineDev:
+    Type: 'AWS::CodePipeline::Pipeline'
+    Properties:
+      RoleArn: !GetAtt 
+        - CodePipelineRole
+        - Arn
+      Stages:
+        - Name: Source
+          Actions:
+            - Name: SourceAction
+              ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Version: '1'
+                Provider: CodeCommit
+              OutputArtifacts:
+                - Name: StaticSiteSource
+              Configuration:
+                BranchName: development
+                RepositoryName: !GetAtt 
+                  - GIT
+                  - Name
+              RunOrder: 1
+        - Name: Build
+          Actions:
+            - Name: BuildDev
+              InputArtifacts:
+                - Name: StaticSiteSource
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Version: '1'
+                Provider: CodeBuild
+              Configuration:
+                ProjectName: !Ref CodeBuildDev
+              RunOrder: 1
+      ArtifactStore:
+        Type: S3
+        Location: !Ref ArtifactBucket
+
+Outputs:
+  RootBucketOutput:
+    Description: Output of Root Bucket Arn
+    Value: !GetAtt
+      - RootBucket
+      - Arn
+    Export:
+      Name: !Sub "rootbucket-arn"
+  
+  WWWBucketOutput:
+    Description: Output of WWW Bucket Arn
+    Value: !GetAtt
+      - WWWBucket
+      - Arn
+    Export:
+      Name: !Sub "wwwbucket-arn"
+  DevBucketOutput:
+    Description: Output of Dev Bucket Arn
+    Value: !GetAtt 
+      - DevBucket
+      - Arn
+    Export:
+      Name: !Sub "devbucket-arn"
